@@ -210,9 +210,8 @@ def ask_gemini_generate_solutions(train_data, delay_reason):
 "overall_confidence": number (0-100),
 "throughput_improvement_potential": "string (short, realistic description)"
 }'''
-        
         prompt = f"""
-        You are a railway operations expert. Analyze the delayed train and generate multiple practical, actionable solutions to recover lost time and improve overall throughput.
+You are a railway operations expert. Analyze the delayed train and generate multiple practical, actionable solutions to recover lost time and improve overall throughput.
 
 TRAIN DATA: {json.dumps(train_data, indent=2)}
 DELAY REASON: {delay_reason}
@@ -230,7 +229,7 @@ Example: 'Train X should switch to track Y at station Z at HH:MM'
 Example: 'Increase speed by X km/h between stations A and B for Y km'
 
 Example: 'Hold train X at station Z for X minutes to allow precedence'
-Avoid vague or infeasible suggestions like 'don't hold at station'.
+Avoid vague or infeasible suggestions like 'don’t hold at station'.
 
 Operational levers to consider:
 
@@ -252,8 +251,21 @@ Provide only actionable, implementable steps; no pseudo-code or placeholders
 
 Output format (strict JSON, no markdown):
 
-{json_template}
-        """
+{
+"solutions": [
+{
+"solution_type": "string (platform_reassignment/speed_adjustment/route_optimization/congestion_management)",
+"description": "string (exact actionable steps with station, track, timing, speed if applicable)",
+"expected_impact_minutes": number,
+"priority": "High/Medium/Low",
+"implementation_complexity": "Low/Medium/High"
+}
+],
+"overall_confidence": number (0-100),
+"throughput_improvement_potential": "string (short, realistic description)"
+}
+"""
+
         
         payload = {
             "contents": [{
