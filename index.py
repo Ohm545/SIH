@@ -4,9 +4,10 @@ from dotenv import load_dotenv
 import requests
 import json
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 import threading
 import os
+
 load_dotenv() 
 app = Flask(__name__)
 CORS(app)
@@ -61,6 +62,8 @@ TRAINS_ARRAY = {
 processed_trains_data = {}
 gemini_analysis_results = {}
 all_trains_table_data = []
+background_processing_active = False
+kpi_history = []
 
 @app.route('/')
 def index():
@@ -196,7 +199,6 @@ def ask_gemini_generate_solutions(train_data, delay_reason):
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
         
-        # Use a raw string or separate the JSON template
         json_template = '''{
 "solutions": [
 {
@@ -229,7 +231,7 @@ Example: 'Train X should switch to track Y at station Z at HH:MM'
 Example: 'Increase speed by X km/h between stations A and B for Y km'
 
 Example: 'Hold train X at station Z for X minutes to allow precedence'
-Avoid vague or infeasible suggestions like 'don’t hold at station'.
+Avoid vague or infeasible suggestions like 'don't hold at station'.
 
 Operational levers to consider:
 
@@ -251,19 +253,7 @@ Provide only actionable, implementable steps; no pseudo-code or placeholders
 
 Output format (strict JSON, no markdown):
 
-{
-"solutions": [
-{
-"solution_type": "string (platform_reassignment/speed_adjustment/route_optimization/congestion_management)",
-"description": "string (exact actionable steps with station, track, timing, speed if applicable)",
-"expected_impact_minutes": number,
-"priority": "High/Medium/Low",
-"implementation_complexity": "Low/Medium/High"
-}
-],
-"overall_confidence": number (0-100),
-"throughput_improvement_potential": "string (short, realistic description)"
-}
+{json_template}
 """
 
         
@@ -290,11 +280,12 @@ Output format (strict JSON, no markdown):
     except Exception as e:
         print(f"💥 Solutions generation error: {str(e)}")
         return None
+
 def process_trains_sequentially():
     """
     Process all 32 trains sequentially and send each to Gemini individually
     """
-    global processed_trains_data, gemini_analysis_results, all_trains_table_data
+    global processed_trains_data, gemini_analysis_results, all_trains_table_data, kpi_history
     
     print("🚆 STARTING SEQUENTIAL PROCESSING OF 32 TRAINS")
     print("=" * 60)
@@ -367,22 +358,176 @@ def process_trains_sequentially():
         'target_stations': TARGET_STATIONS
     }
     
+    # Calculate and store KPIs
+    calculate_and_store_kpis()
+    
     print(f"\n📊 Processing completed: {len(successful_trains)}/{len(train_numbers)} trains successful")
     print(f"🎯 Trains near target stations: {len(gemini_analysis_results.get('trains_near_stations', []))}")
 
+def calculate_and_store_kpis():
+    """Calculate KPIs based on current train data and store in history"""
+    global kpi_history
+    
+    if not all_trains_table_data:
+        return
+    
+    # Calculate current KPIs
+    total_trains = len(all_trains_table_data)
+    
+    # Calculate delays
+    delays = [train.get('delay', 0) for train in all_trains_table_data if isinstance(train.get('delay'), (int, float))]
+    avg_delay = sum(delays) / len(delays) if delays else 0
+    
+    # Count delayed trains (more than 5 minutes)
+    trains_with_delays = sum(1 for delay in delays if delay > 5)
+    
+    # Calculate on-time percentage
+    on_time_percentage = ((total_trains - trains_with_delays) / total_trains * 100) if total_trains else 0
+    
+    # Calculate trains near target stations (for throughput estimation)
+    near_stations_count = len(gemini_analysis_results.get('trains_near_stations', []))
+    
+    # Calculate throughput (trains per hour) - based on trains near stations and processing rate
+    # Assuming each train takes ~2 minutes to pass through critical section
+    if near_stations_count > 0:
+        actual_throughput = min((near_stations_count * 30) / 60, 25)  # Convert to hourly rate
+    else:
+        actual_throughput = 0
+    
+    # Calculate utilization percentages
+    max_track_capacity = 8  # Maximum trains that can be in section simultaneously
+    max_platform_capacity = 6  # Maximum trains at platforms
+    
+    track_utilization = min(100, (near_stations_count / max_track_capacity) * 100)
+    platform_utilization = min(100, (near_stations_count / max_platform_capacity) * 100)
+    
+    # Store KPI data
+    kpi_data = {
+        'timestamp': datetime.now().isoformat(),
+        'throughput_metrics': {
+            'planned_throughput_trains_per_hour': 20.0,  # Target throughput
+            'actual_throughput_trains_per_hour': round(actual_throughput, 1)
+        },
+        'delay_metrics': {
+            'average_delay_minutes': round(avg_delay, 1),
+            'delayed_trains_count': trains_with_delays,
+            'on_time_percentage': round(on_time_percentage, 1)
+        },
+        'utilization_metrics': {
+            'track_utilization_percentage': round(track_utilization, 1),
+            'platform_utilization_percentage': round(platform_utilization, 1)
+        },
+        'punctuality_metrics': {
+            'on_time_percentage': round(on_time_percentage, 1),
+            'delayed_percentage': round(100 - on_time_percentage, 1)
+        },
+        'active_trains': total_trains,
+        'trains_near_stations': near_stations_count
+    }
+    
+    # Add to history (keep last 50 entries)
+    kpi_history.append(kpi_data)
+    if len(kpi_history) > 50:
+        kpi_history = kpi_history[-50:]
+    
+    print(f"📈 KPIs calculated - Throughput: {actual_throughput:.1f}, Avg Delay: {avg_delay:.1f}min, On-time: {on_time_percentage:.1f}%")
+
+def get_kpi_trends():
+    """Calculate KPI trends based on historical data"""
+    if len(kpi_history) < 2:
+        return {
+            'throughput_trend': 0,
+            'delay_trend': 0,
+            'utilization_trend': 0,
+            'punctuality_trend': 0
+        }
+    
+    current = kpi_history[-1]
+    previous = kpi_history[-2] if len(kpi_history) >= 2 else kpi_history[-1]
+    
+    return {
+        'throughput_trend': current['throughput_metrics']['actual_throughput_trains_per_hour'] - previous['throughput_metrics']['actual_throughput_trains_per_hour'],
+        'delay_trend': current['delay_metrics']['average_delay_minutes'] - previous['delay_metrics']['average_delay_minutes'],
+        'utilization_trend': current['utilization_metrics']['track_utilization_percentage'] - previous['utilization_metrics']['track_utilization_percentage'],
+        'punctuality_trend': current['punctuality_metrics']['on_time_percentage'] - previous['punctuality_metrics']['on_time_percentage']
+    }
+
 def start_background_processing():
     """Start background processing of trains"""
+    global background_processing_active
+    
     def process_job():
-        while True:
+        while background_processing_active:
             process_trains_sequentially()
             # Wait 5 minutes before next processing cycle
-            time.sleep(300)
+            for i in range(300):  # 300 seconds = 5 minutes
+                if not background_processing_active:
+                    break
+                time.sleep(1)
     
-    thread = threading.Thread(target=process_job, daemon=True)
-    thread.start()
-    print("🔄 Background processing started...")
+    if not background_processing_active:
+        background_processing_active = True
+        thread = threading.Thread(target=process_job, daemon=True)
+        thread.start()
+        print("🔄 Background processing started...")
+
+def stop_background_processing():
+    """Stop background processing"""
+    global background_processing_active
+    background_processing_active = False
+    print("⏹️ Background processing stopped...")
 
 # API Endpoints
+
+@app.route('/api/control/start', methods=['POST'])
+def start_data_processing():
+    """Start data processing manually"""
+    try:
+        start_background_processing()
+        return jsonify({
+            'success': True,
+            'message': 'Data processing started successfully',
+            'status': 'running',
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
+
+@app.route('/api/control/stop', methods=['POST'])
+def stop_data_processing():
+    """Stop data processing manually"""
+    try:
+        stop_background_processing()
+        return jsonify({
+            'success': True,
+            'message': 'Data processing stopped successfully',
+            'status': 'stopped',
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': str(e),
+            'timestamp': datetime.now().isoformat()
+        }), 500
+
+@app.route('/api/control/status')
+def get_processing_status():
+    """Get current processing status"""
+    return jsonify({
+        'success': True,
+        'data': {
+            'status': 'running' if background_processing_active else 'stopped',
+            'last_processed': datetime.now().isoformat(),
+            'trains_processed': len(processed_trains_data),
+            'background_processing_active': background_processing_active
+        },
+        'timestamp': datetime.now().isoformat()
+    })
 
 @app.route('/api/dashboard/summary')
 def get_dashboard_summary():
@@ -396,7 +541,8 @@ def get_dashboard_summary():
                 'last_updated': datetime.now().isoformat()
             },
             'system_status': 'operational',
-            'active_trains': len(processed_trains_data)
+            'active_trains': len(processed_trains_data),
+            'processing_status': 'running' if background_processing_active else 'stopped'
         },
         'timestamp': datetime.now().isoformat()
     })
@@ -439,66 +585,59 @@ def get_trains_schedule():
 
 @app.route('/api/kpi/current')
 def get_current_kpis():
-    """Get current KPIs - USING LIVE DATA"""
-    if not all_trains_table_data:
+    """Get current KPIs - CALCULATED FROM LIVE DATA"""
+    if not kpi_history:
+        # Return default values if no data
         return jsonify({
             'success': True,
             'data': {
                 'kpi_data': {
                     'throughput_metrics': {
-                        'planned_throughput_trains_per_hour': 0,
-                        'actual_throughput_trains_per_hour': 0
+                        'planned_throughput_trains_per_hour': 20.0,
+                        'actual_throughput_trains_per_hour': 0.0
                     },
                     'delay_metrics': {
-                        'average_delay_minutes': 0,
+                        'average_delay_minutes': 0.0,
                         'delayed_trains_count': 0,
-                        'on_time_percentage': 0
+                        'on_time_percentage': 0.0
                     },
                     'utilization_metrics': {
-                        'track_utilization_percentage': 0,
-                        'platform_utilization_percentage': 0
+                        'track_utilization_percentage': 0.0,
+                        'platform_utilization_percentage': 0.0
                     },
                     'punctuality_metrics': {
-                        'on_time_percentage': 0,
-                        'delayed_percentage': 0
+                        'on_time_percentage': 0.0,
+                        'delayed_percentage': 0.0
                     }
+                },
+                'trends': {
+                    'throughput_trend': 0,
+                    'delay_trend': 0,
+                    'utilization_trend': 0,
+                    'punctuality_trend': 0
                 }
             },
             'timestamp': datetime.now().isoformat()
         })
     
-    total_trains = len(all_trains_table_data)
-    delays = [train.get('delay', 0) for train in all_trains_table_data]
-    trains_with_delays = sum(1 for delay in delays if delay > 5)
-    avg_delay = sum(delays) / len(delays) if delays else 0
-    
-    # Calculate throughput based on trains near target stations
-    near_stations_count = len(gemini_analysis_results.get('trains_near_stations', []))
-    actual_throughput = min(near_stations_count / 2, 12)  # Simple calculation
+    current_kpis = kpi_history[-1]
+    trends = get_kpi_trends()
     
     return jsonify({
         'success': True,
         'data': {
-            'kpi_data': {
-                'throughput_metrics': {
-                    'planned_throughput_trains_per_hour': 12.5,
-                    'actual_throughput_trains_per_hour': round(actual_throughput, 1)
-                },
-                'delay_metrics': {
-                    'average_delay_minutes': round(avg_delay, 1),
-                    'delayed_trains_count': trains_with_delays,
-                    'on_time_percentage': round(((total_trains - trains_with_delays) / total_trains * 100), 1)
-                },
-                'utilization_metrics': {
-                    'track_utilization_percentage': min(100, round((near_stations_count / 8) * 100, 1)),
-                    'platform_utilization_percentage': min(100, round((near_stations_count / 6) * 100, 1))
-                },
-                'punctuality_metrics': {
-                    'on_time_percentage': round(((total_trains - trains_with_delays) / total_trains * 100), 1),
-                    'delayed_percentage': round((trains_with_delays / total_trains * 100), 1)
-                }
-            }
+            'kpi_data': current_kpis,
+            'trends': trends
         },
+        'timestamp': datetime.now().isoformat()
+    })
+
+@app.route('/api/kpi/history')
+def get_kpi_history():
+    """Get KPI history for charts"""
+    return jsonify({
+        'success': True,
+        'data': kpi_history[-24:],  # Last 24 entries
         'timestamp': datetime.now().isoformat()
     })
 
@@ -604,10 +743,12 @@ def get_system_status():
         'data': {
             'railradar_api': 'connected' if processed_trains_data else 'disconnected',
             'gemini_ai': 'connected',
-            'processing_status': 'active',
+            'processing_status': 'running' if background_processing_active else 'stopped',
             'last_processed': datetime.now().isoformat(),
             'trains_processed': len(processed_trains_data),
-            'table_data_available': len(all_trains_table_data)
+            'table_data_available': len(all_trains_table_data),
+            'background_processing_active': background_processing_active,
+            'kpis_calculated': len(kpi_history) > 0
         },
         'timestamp': datetime.now().isoformat()
     })
@@ -616,11 +757,9 @@ if __name__ == '__main__':
     # Create static directory if it doesn't exist
     os.makedirs('static', exist_ok=True)
     
-    # Start background processing
-    start_background_processing()
-    
     print("🚀 Starting VyuhMitra Backend Server...")
     print("📊 Dashboard available at: http://127.0.0.1:5000")
     print("🔗 API endpoints available at: http://127.0.0.1:5000/api/")
+    print("⏸️  Data processing is stopped initially. Use the start button to begin.")
     port = int(os.getenv("PORT", 5000))
     app.run(debug=True, host='0.0.0.0', port=port)
