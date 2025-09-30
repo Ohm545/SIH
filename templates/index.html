@@ -141,6 +141,91 @@
             box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
         }
 
+        /* Control Panel */
+        .control-panel {
+            background: rgba(30, 41, 59, 0.9);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin: 0 20px 16px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            backdrop-filter: blur(10px);
+        }
+
+        .control-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: #60a5fa;
+        }
+
+        .control-buttons {
+            display: flex;
+            gap: 10px;
+        }
+
+        .control-btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            font-size: 0.8rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .control-btn.start {
+            background: linear-gradient(135deg, #22c55e, #16a34a);
+            color: white;
+        }
+
+        .control-btn.stop {
+            background: linear-gradient(135deg, #ef4444, #dc2626);
+            color: white;
+        }
+
+        .control-btn:disabled {
+            background: #6c757d;
+            cursor: not-allowed;
+            opacity: 0.6;
+        }
+
+        .control-btn:hover:not(:disabled) {
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+        }
+
+        .control-status {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.8rem;
+        }
+
+        .status-indicator {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }
+
+        .status-stopped {
+            background: #ef4444;
+        }
+
+        .status-running {
+            background: #22c55e;
+            animation: pulse 1.5s infinite;
+        }
+
+        .last-update {
+            color: #94a3b8;
+            font-size: 0.7rem;
+        }
+
         /* Main Dashboard Grid */
         .dashboard-grid {
             flex: 1;
@@ -148,7 +233,7 @@
             grid-template-columns: 2fr 1fr 1fr;
             grid-template-rows: 1fr 1fr;
             gap: 16px;
-            padding: 16px;
+            padding: 0 16px 16px 16px;
             overflow: hidden;
         }
 
@@ -928,6 +1013,26 @@
             </div>
         </header>
 
+        <!-- Data Processing Control Panel -->
+        <div class="control-panel">
+            <div class="control-title">🚦 Data Processing Control</div>
+            <div class="control-buttons">
+                <button id="startBtn" class="control-btn start" onclick="startDataProcessing()">
+                    ▶️ Start Data Processing
+                </button>
+                <button id="stopBtn" class="control-btn stop" onclick="stopDataProcessing()" disabled>
+                    ⏹️ Stop Data Processing
+                </button>
+            </div>
+            <div class="control-status">
+                <span class="status-indicator status-stopped" id="statusIndicator"></span>
+                <span id="statusText">Stopped - Click Start to begin data processing</span>
+            </div>
+            <div class="last-update">
+                Last update: <span id="lastUpdateTime">Never</span>
+            </div>
+        </div>
+
         <!-- Main Dashboard Grid -->
         <div class="dashboard-grid">
             
@@ -1082,8 +1187,8 @@
                 <div class="kpi-grid">
                     <div class="kpi-card throughput">
                         <div class="kpi-icon">🚊</div>
-                        <div class="kpi-value" id="throughput-value">96.5</div>
-                        <div class="kpi-label">Percentage</div>
+                        <div class="kpi-value" id="throughput-value">0.0</div>
+                        <div class="kpi-label">Trains/Hour</div>
                         <div class="kpi-change" id="throughput-change">--</div>
                     </div>
                     <div class="kpi-card delay">
@@ -1214,6 +1319,8 @@
     <script>
         // Global variables
         let refreshInterval;
+        let statusCheckInterval;
+        let autoUpdateInterval;
         
         // Initialize dashboard
         document.addEventListener('DOMContentLoaded', function() {
@@ -1246,9 +1353,9 @@
             // Initialize system indicators
             updateSystemIndicators();
             
-            // Load initial data
-            loadAllData();
-            refreshInterval = setInterval(loadAllData, 30000); // Refresh every 30 seconds
+            // Initialize control panel status
+            checkProcessingStatus();
+            statusCheckInterval = setInterval(checkProcessingStatus, 5000); // Check every 5 seconds
         });
         
         // Update system indicators
@@ -1261,6 +1368,151 @@
             });
             
             document.getElementById('system-status').textContent = 'Operational';
+        }
+        
+        // Data Processing Control Functions
+        function startDataProcessing() {
+            fetch('/api/control/start', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        updateControlStatus('running', 'Data processing started successfully');
+                        document.getElementById('startBtn').disabled = true;
+                        document.getElementById('stopBtn').disabled = false;
+                        
+                        // Start auto-update
+                        startAutoUpdate();
+                        
+                        // Show success message
+                        showNotification('Data processing started! Auto-update enabled.', 'success');
+                    } else {
+                        showNotification('Failed to start processing: ' + data.error, 'error');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error starting processing:', error);
+                    showNotification('Error starting data processing', 'error');
+                });
+        }
+
+        function stopDataProcessing() {
+            fetch('/api/control/stop', { method: 'POST' })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        updateControlStatus('stopped', 'Data processing stopped');
+                        document.getElementById('startBtn').disabled = false;
+                        document.getElementById('stopBtn').disabled = true;
+                        
+                        // Stop auto-update
+                        stopAutoUpdate();
+                        
+                        // Show success message
+                        showNotification('Data processing stopped!', 'info');
+                    } else {
+                        showNotification('Failed to stop processing: ' + data.error, 'error');
+                    }
+                })
+                .catch(error => {
+                    console.error('Error stopping processing:', error);
+                    showNotification('Error stopping data processing', 'error');
+                });
+        }
+
+        function checkProcessingStatus() {
+            fetch('/api/control/status')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        const status = data.data.status;
+                        const lastProcessed = new Date(data.data.last_processed).toLocaleString();
+                        
+                        if (status === 'running') {
+                            updateControlStatus('running', 'Data processing is running');
+                            document.getElementById('startBtn').disabled = true;
+                            document.getElementById('stopBtn').disabled = false;
+                            
+                            // Ensure auto-update is running
+                            if (!autoUpdateInterval) {
+                                startAutoUpdate();
+                            }
+                        } else {
+                            updateControlStatus('stopped', 'Data processing is stopped');
+                            document.getElementById('startBtn').disabled = false;
+                            document.getElementById('stopBtn').disabled = true;
+                        }
+                        
+                        document.getElementById('lastUpdateTime').textContent = lastProcessed;
+                    }
+                })
+                .catch(error => {
+                    console.error('Error checking status:', error);
+                });
+        }
+
+        function updateControlStatus(status, message) {
+            const statusIndicator = document.getElementById('statusIndicator');
+            const statusText = document.getElementById('statusText');
+            
+            statusIndicator.className = 'status-indicator';
+            if (status === 'running') {
+                statusIndicator.classList.add('status-running');
+            } else {
+                statusIndicator.classList.add('status-stopped');
+            }
+            
+            statusText.textContent = message;
+        }
+
+        function startAutoUpdate() {
+            // Clear existing interval
+            if (autoUpdateInterval) {
+                clearInterval(autoUpdateInterval);
+            }
+            
+            // Start new interval (update every 30 seconds)
+            autoUpdateInterval = setInterval(() => {
+                console.log('Auto-updating dashboard data...');
+                refreshDashboardData();
+            }, 30000); // 30 seconds
+            
+            // Also update immediately
+            refreshDashboardData();
+        }
+
+        function stopAutoUpdate() {
+            if (autoUpdateInterval) {
+                clearInterval(autoUpdateInterval);
+                autoUpdateInterval = null;
+            }
+        }
+
+        function refreshDashboardData() {
+            // Call your existing dashboard refresh functions here
+            loadAllData();
+            console.log('Refreshing dashboard data...');
+        }
+
+        function showNotification(message, type = 'info') {
+            // Simple notification implementation
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed;
+                top: 20px;
+                right: 20px;
+                padding: 15px;
+                border-radius: 5px;
+                color: white;
+                font-weight: bold;
+                z-index: 1000;
+                background: ${type === 'success' ? '#28a745' : type === 'error' ? '#dc3545' : '#17a2b8'};
+            `;
+            notification.textContent = message;
+            document.body.appendChild(notification);
+            
+            setTimeout(() => {
+                document.body.removeChild(notification);
+            }, 3000);
         }
         
         // Load all dashboard data
@@ -1532,6 +1784,13 @@
             `;
             auditList.prepend(auditItem);
         }
+
+        // Clean up intervals when page unloads
+        window.addEventListener('beforeunload', () => {
+            if (autoUpdateInterval) clearInterval(autoUpdateInterval);
+            if (statusCheckInterval) clearInterval(statusCheckInterval);
+            if (refreshInterval) clearInterval(refreshInterval);
+        });
     </script>
 </body>
 </html>
